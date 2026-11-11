@@ -1,0 +1,6 @@
+{
+  "name": "NexCarga — SaaS B2B LogTech",
+  "description": "Sua carga. Nossa conexão. Plataforma SaaS B2B LogTech desenvolvida pela PUPA LABS para conectar embarcadores, empresas, transportadoras, motoristas e afiliados com NexRadar, NexColeta, NexIA, NexVerify e NexFinance.",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

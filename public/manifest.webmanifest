@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "NexCarga — Sua carga. Nossa conexão.",
+  "short_name": "NexCarga",
+  "description": "Plataforma SaaS B2B LogTech da PUPA LABS para gestão de fretes, NexRadar, NexColeta, NexIA e contratos logísticos.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#FF8A00",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/aistudio/16_Mobile_PWA_9405a931.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
