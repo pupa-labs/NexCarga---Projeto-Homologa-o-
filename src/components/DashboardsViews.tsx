@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard,
   Users,
@@ -91,11 +91,12 @@ interface DashboardsViewsProps {
     targetRole: 'DRIVER' | 'COMPANY' | 'AFFILIATE';
     justification: string;
   }) => Promise<string | null>;
-  onUpdateSettings: (payload: Record<string, any>) => Promise<void>;
+  onUpdateSettings: (payload: Record<string, any>) => Promise<string | null | void>;
   settings: {
     dailyFreeNexPointLimit: number;
     contractMaintenanceFeePercent: number;
     affiliateFirstSubscriptionCommissionPercent: number;
+    affiliateNexIASubscriptionCommissionPercent?: number;
     affiliateContractFeeCommissionPercent: number;
   };
 }
@@ -120,7 +121,24 @@ export const DashboardsViews: React.FC<DashboardsViewsProps> = ({
   const [cfgNexPoint, setCfgNexPoint] = useState(String(settings.dailyFreeNexPointLimit));
   const [cfgFeePercent, setCfgFeePercent] = useState(String(settings.contractMaintenanceFeePercent));
   const [cfgAffFirst, setCfgAffFirst] = useState(String(settings.affiliateFirstSubscriptionCommissionPercent));
+  const [cfgAffNexIA, setCfgAffNexIA] = useState(String(settings.affiliateNexIASubscriptionCommissionPercent ?? 25));
+  const [cfgAffContractFee, setCfgAffContractFee] = useState(String(settings.affiliateContractFeeCommissionPercent));
   const [cfgSaved, setCfgSaved] = useState(false);
+  const [cfgError, setCfgError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCfgNexPoint(String(settings.dailyFreeNexPointLimit));
+    setCfgFeePercent(String(settings.contractMaintenanceFeePercent));
+    setCfgAffFirst(String(settings.affiliateFirstSubscriptionCommissionPercent));
+    setCfgAffNexIA(String(settings.affiliateNexIASubscriptionCommissionPercent ?? 25));
+    setCfgAffContractFee(String(settings.affiliateContractFeeCommissionPercent));
+  }, [
+    settings.dailyFreeNexPointLimit,
+    settings.contractMaintenanceFeePercent,
+    settings.affiliateFirstSubscriptionCommissionPercent,
+    settings.affiliateNexIASubscriptionCommissionPercent,
+    settings.affiliateContractFeeCommissionPercent,
+  ]);
 
   // Estados do Motorista (05)
   const [driverNotice, setDriverNotice] = useState<string | null>(null);
@@ -182,11 +200,47 @@ export const DashboardsViews: React.FC<DashboardsViewsProps> = ({
 
     const handleSaveSettings = async (e: React.FormEvent) => {
       e.preventDefault();
-      await onUpdateSettings({
-        dailyFreeNexPointLimit: Number(cfgNexPoint),
-        contractMaintenanceFeePercent: Number(cfgFeePercent),
-        affiliateFirstSubscriptionCommissionPercent: Number(cfgAffFirst),
+      setCfgError(null);
+      setCfgSaved(false);
+
+      const nexPointNum = Number(cfgNexPoint);
+      const feeNum = Number(cfgFeePercent);
+      const affFirstNum = Number(cfgAffFirst);
+      const affNexIANum = Number(cfgAffNexIA);
+      const affContractFeeNum = Number(cfgAffContractFee);
+
+      if (!Number.isFinite(nexPointNum) || nexPointNum < 1) {
+        setCfgError('Informe um limite NexPoint válido (mínimo 1 uso/24h).');
+        return;
+      }
+
+      const pctChecks = [
+        { label: 'Taxa Contrato (%)', val: feeNum },
+        { label: 'Comissão 1ª Assin. Standard (%)', val: affFirstNum },
+        { label: 'Comissão Assin. NexIA (%)', val: affNexIANum },
+        { label: 'Comissão Taxa Serviço (%)', val: affContractFeeNum },
+      ];
+
+      for (const item of pctChecks) {
+        if (!Number.isFinite(item.val) || item.val < 0 || item.val > 100) {
+          setCfgError(`Valor inválido em "${item.label}": informe um número finito entre 0 e 100.`);
+          return;
+        }
+      }
+
+      const err = await onUpdateSettings({
+        dailyFreeNexPointLimit: nexPointNum,
+        contractMaintenanceFeePercent: feeNum,
+        affiliateFirstSubscriptionCommissionPercent: affFirstNum,
+        affiliateNexIASubscriptionCommissionPercent: affNexIANum,
+        affiliateContractFeeCommissionPercent: affContractFeeNum,
       });
+
+      if (typeof err === 'string' && err) {
+        setCfgError(err);
+        return;
+      }
+
       setCfgSaved(true);
       setTimeout(() => setCfgSaved(false), 2500);
     };
@@ -441,36 +495,88 @@ export const DashboardsViews: React.FC<DashboardsViewsProps> = ({
                 Controle no backend dos limites do NexPoint, taxa de manutenção de contratos e comissões do programa de afiliados.
               </p>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs text-gray-300 mb-1">NexPoint (Usos / 24h)</label>
+                  <label htmlFor="cfg-nexpoint" className="block text-xs text-gray-300 mb-1">
+                    NexPoint (Usos / 24h)
+                  </label>
                   <input
+                    id="cfg-nexpoint"
                     type="number"
+                    min="1"
+                    step="1"
                     value={cfgNexPoint}
                     onChange={(e) => setCfgNexPoint(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-[#111111] border border-white/10 text-xs text-white font-mono"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-300 mb-1">Taxa Contrato (%)</label>
+                  <label htmlFor="cfg-contract-fee" className="block text-xs text-gray-300 mb-1">
+                    Taxa Contrato (%)
+                  </label>
                   <input
+                    id="cfg-contract-fee"
                     type="number"
-                    step="0.5"
+                    min="0"
+                    max="100"
+                    step="0.01"
                     value={cfgFeePercent}
                     onChange={(e) => setCfgFeePercent(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-[#111111] border border-white/10 text-xs text-white font-mono"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-300 mb-1">Comissão 1ª Assin. (%)</label>
+                  <label htmlFor="cfg-aff-contract-fee" className="block text-xs text-gray-300 mb-1">
+                    Comissão Taxa Serviço (%)
+                  </label>
                   <input
+                    id="cfg-aff-contract-fee"
                     type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    value={cfgAffContractFee}
+                    onChange={(e) => setCfgAffContractFee(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-[#111111] border border-white/10 text-xs text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="cfg-aff-first-sub" className="block text-xs text-gray-300 mb-1">
+                    Comissão 1ª Assin. (%)
+                  </label>
+                  <input
+                    id="cfg-aff-first-sub"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
                     value={cfgAffFirst}
                     onChange={(e) => setCfgAffFirst(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-[#111111] border border-white/10 text-xs text-white font-mono"
                   />
                 </div>
+                <div>
+                  <label htmlFor="cfg-aff-nexia-sub" className="block text-xs text-gray-300 mb-1">
+                    Comissão Assin. NexIA (%)
+                  </label>
+                  <input
+                    id="cfg-aff-nexia-sub"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    value={cfgAffNexIA}
+                    onChange={(e) => setCfgAffNexIA(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-[#111111] border border-white/10 text-xs text-white font-mono"
+                  />
+                </div>
               </div>
+
+              {cfgError && (
+                <div className="p-2.5 rounded-lg bg-red-500/15 border border-red-500/30 text-xs text-red-300">
+                  {cfgError}
+                </div>
+              )}
 
               {cfgSaved && (
                 <div className="p-2.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-xs text-emerald-300">

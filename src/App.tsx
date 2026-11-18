@@ -70,9 +70,10 @@ export default function App() {
   const [plans, setPlans] = useState<PlanItem[]>([]);
   const [settings, setSettings] = useState({
     dailyFreeNexPointLimit: 3,
-    contractMaintenanceFeePercent: 6.5,
+    contractMaintenanceFeePercent: 3.5,
     affiliateFirstSubscriptionCommissionPercent: 25,
-    affiliateContractFeeCommissionPercent: 10,
+    affiliateNexIASubscriptionCommissionPercent: 25,
+    affiliateContractFeeCommissionPercent: 1.75,
   });
   const [nexPoint, setNexPoint] = useState<NexPointState>({
     allowed: true,
@@ -100,6 +101,8 @@ export default function App() {
           dailyFreeNexPointLimit: data.settings.dailyFreeNexPointLimit,
           contractMaintenanceFeePercent: data.settings.contractMaintenanceFeePercent,
           affiliateFirstSubscriptionCommissionPercent: data.settings.affiliateFirstSubscriptionCommissionPercent,
+          affiliateNexIASubscriptionCommissionPercent:
+            data.settings.affiliateNexIASubscriptionCommissionPercent ?? 25,
           affiliateContractFeeCommissionPercent: data.settings.affiliateContractFeeCommissionPercent,
         });
         setPlans(data.settings.plans || []);
@@ -169,13 +172,18 @@ export default function App() {
     await refreshBootstrap();
   };
 
-  const handleUpdateSettings = async (payload: Record<string, any>) => {
-    await fetch('/api/admin/settings', {
+  const handleUpdateSettings = async (payload: Record<string, any>): Promise<string | null> => {
+    const res = await fetch('/api/admin/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      return errData.error || 'Erro ao atualizar parâmetros comerciais.';
+    }
     await refreshBootstrap();
+    return null;
   };
 
   const handleRequestPickup = async (payload: Record<string, any>) => {

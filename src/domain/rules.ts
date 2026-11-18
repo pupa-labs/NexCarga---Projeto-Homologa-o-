@@ -375,8 +375,121 @@ export function validateNexColetaGrouping(
 }
 
 /**
- * 5. PROGRAMA DE AFILIADOS — Cálculo de Comissões e Antifraude no Servidor
+ * 5. PARÂMETROS COMERCIAIS, TAXA DE CONTRATO E PROGRAMA DE AFILIADOS
  */
+export interface CommercialRatesConfig {
+  contractMaintenanceFeePercent: number;
+  affiliateContractFeeCommissionPercent: number;
+  affiliateFirstSubscriptionCommissionPercent: number;
+  affiliateNexIASubscriptionCommissionPercent: number;
+}
+
+export const DEFAULT_COMMERCIAL_RATES: CommercialRatesConfig = {
+  contractMaintenanceFeePercent: 3.5,
+  affiliateContractFeeCommissionPercent: 1.75,
+  affiliateFirstSubscriptionCommissionPercent: 25,
+  affiliateNexIASubscriptionCommissionPercent: 25,
+};
+
+/**
+ * Arredondamento monetário consistente (half-up comercial para 2 casas decimais)
+ * eliminando imprecisões de representação binária IEEE-754 (ex.: 79.90 * 25% = 19.975 -> 19.98; 350 * 1.75% = 6.125 -> 6.13).
+ */
+export function roundCurrencyBrl(value: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error('Valor monetário inválido: informe um número finito.');
+  }
+  const sign = value < 0 ? -1 : 1;
+  const absNormalized = Number(Math.abs(value).toPrecision(12));
+  return (sign * Math.round(absNormalized * 100)) / 100;
+}
+
+export function isValidPercentage(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
+}
+
+export function validatePercentageParam(
+  value: unknown,
+  fieldName = 'percentual'
+): { valid: boolean; value: number; error?: string } {
+  if (!isValidPercentage(value)) {
+    return {
+      valid: false,
+      value: NaN,
+      error: `Parâmetro "${fieldName}" inválido: deve ser um número finito entre 0 e 100.`,
+    };
+  }
+  return { valid: true, value };
+}
+
+export interface ContractFeeCalculationResult {
+  freightPrincipalValueBrl: number;
+  feePercent: number;
+  maintenanceFeeBrl: number;
+}
+
+/**
+ * Calcula a taxa de serviço NexCarga sobre o valor final do contrato,
+ * preservando integralmente o valor principal do frete.
+ */
+export function calculateContractMaintenanceFee(
+  freightPrincipalValueBrl: number,
+  feePercent: number = DEFAULT_COMMERCIAL_RATES.contractMaintenanceFeePercent
+): ContractFeeCalculationResult {
+  if (
+    typeof freightPrincipalValueBrl !== 'number' ||
+    !Number.isFinite(freightPrincipalValueBrl) ||
+    freightPrincipalValueBrl <= 0
+  ) {
+    throw new Error('Valor principal do frete inválido: deve ser um número finito maior que zero.');
+  }
+
+  const pctValidation = validatePercentageParam(feePercent, 'contractMaintenanceFeePercent');
+  if (!pctValidation.valid) {
+    throw new Error(pctValidation.error);
+  }
+
+  const principal = roundCurrencyBrl(freightPrincipalValueBrl);
+  const maintenanceFeeBrl = roundCurrencyBrl((principal * pctValidation.value) / 100);
+
+  return {
+    freightPrincipalValueBrl: principal,
+    feePercent: pctValidation.value,
+    maintenanceFeeBrl,
+  };
+}
+
+/**
+ * Atualiza parâmetros comerciais de forma isolada e segura,
+ * garantindo que números não finitos ou fora de [0, 100] sejam rejeitados
+ * e que alterar uma taxa não afete as demais.
+ */
+export function updateCommercialRatesConfig(
+  current: CommercialRatesConfig,
+  patch: Partial<Record<keyof CommercialRatesConfig, unknown>>
+): CommercialRatesConfig {
+  const next: CommercialRatesConfig = { ...current };
+
+  const keys: (keyof CommercialRatesConfig)[] = [
+    'contractMaintenanceFeePercent',
+    'affiliateContractFeeCommissionPercent',
+    'affiliateFirstSubscriptionCommissionPercent',
+    'affiliateNexIASubscriptionCommissionPercent',
+  ];
+
+  for (const key of keys) {
+    if (patch[key] !== undefined) {
+      const check = validatePercentageParam(patch[key], key);
+      if (!check.valid) {
+        throw new Error(check.error);
+      }
+      next[key] = check.value;
+    }
+  }
+
+  return next;
+}
+
 export interface AffiliateCommissionEvaluationInput {
   affiliateUserId: string;
   affiliateDocumentCpfCnpj: string;
@@ -388,8 +501,10 @@ export interface AffiliateCommissionEvaluationInput {
   eventTimestampMs: number;
   attributionWindowDays: number;
   eventType: 'SIGNUP_ONLY' | 'FIRST_PAID_SUBSCRIPTION' | 'COMPLETED_PAID_CONTRACT_FEE';
-  baseAmountBrl: number; // Valor da 1ª assinatura paga OU valor da taxa de manutenção recebida pela NexCarga
+  subscriptionPlanType?: 'STANDARD' | 'NEXIA';
+  baseAmountBrl: number; // Valor da assinatura paga OU valor da taxa de serviço efetivamente recebida pela NexCarga
   firstSubscriptionCommissionRatePercent: number;
+  nexiaSubscriptionCommissionRatePercent?: number;
   contractFeeCommissionRatePercent: number;
   alreadyPaidFirstSubscriptionCommission?: boolean;
 }
@@ -405,6 +520,34 @@ export interface AffiliateCommissionResult {
 export function evaluateAffiliateCommission(
   input: AffiliateCommissionEvaluationInput
 ): AffiliateCommissionResult {
+  // 0. Validação estrita de limites percentuais (0 a 100, finitos)
+  const nexiaRate =
+    input.nexiaSubscriptionCommissionRatePercent ?? input.firstSubscriptionCommissionRatePercent;
+
+  if (
+    !isValidPercentage(input.firstSubscriptionCommissionRatePercent) ||
+    !isValidPercentage(nexiaRate) ||
+    !isValidPercentage(input.contractFeeCommissionRatePercent)
+  ) {
+    return {
+      eligible: false,
+      fraudBlocked: false,
+      commissionAmountBrl: 0,
+      appliedRatePercent: 0,
+      reason: 'Parâmetro percentual de comissão inválido: deve ser um número finito entre 0 e 100.',
+    };
+  }
+
+  if (typeof input.baseAmountBrl !== 'number' || !Number.isFinite(input.baseAmountBrl)) {
+    return {
+      eligible: false,
+      fraudBlocked: false,
+      commissionAmountBrl: 0,
+      appliedRatePercent: 0,
+      reason: 'Valor base de cálculo inválido: deve ser um número finito.',
+    };
+  }
+
   // 1. Prevenção de autoindicação e fraude
   const cleanAffDoc = input.affiliateDocumentCpfCnpj.replace(/\D/g, '');
   const cleanRefDoc = input.referredDocumentCpfCnpj.replace(/\D/g, '');
@@ -446,7 +589,7 @@ export function evaluateAffiliateCommission(
     };
   }
 
-  // 4. Modalidade 1: Primeira assinatura paga
+  // 4. Modalidade 1: Assinatura paga (Standard ou NexIA)
   if (input.eventType === 'FIRST_PAID_SUBSCRIPTION') {
     if (input.alreadyPaidFirstSubscriptionCommission) {
       return {
@@ -458,21 +601,24 @@ export function evaluateAffiliateCommission(
       };
     }
 
-    const amount = Number(
-      ((input.baseAmountBrl * input.firstSubscriptionCommissionRatePercent) / 100).toFixed(2)
-    );
+    const appliedSubRate =
+      input.subscriptionPlanType === 'NEXIA'
+        ? nexiaRate
+        : input.firstSubscriptionCommissionRatePercent;
+
+    const amount = roundCurrencyBrl((input.baseAmountBrl * appliedSubRate) / 100);
     return {
       eligible: true,
       fraudBlocked: false,
       commissionAmountBrl: amount,
-      appliedRatePercent: input.firstSubscriptionCommissionRatePercent,
+      appliedRatePercent: appliedSubRate,
       reason: 'Comissão aprovada sobre a primeira assinatura paga do cliente indicado.',
     };
   }
 
   // 5. Modalidade 2: Taxa de manutenção efetivamente recebida em contrato elegível, concluído e pago
-  const amount = Number(
-    ((input.baseAmountBrl * input.contractFeeCommissionRatePercent) / 100).toFixed(2)
+  const amount = roundCurrencyBrl(
+    (input.baseAmountBrl * input.contractFeeCommissionRatePercent) / 100
   );
   return {
     eligible: true,

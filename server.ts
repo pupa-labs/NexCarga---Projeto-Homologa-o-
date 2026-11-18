@@ -9,6 +9,8 @@ import {
   BRAZILIAN_IMPLEMENT_CATALOG,
 } from './src/domain/catalog.ts';
 import {
+  DEFAULT_COMMERCIAL_RATES,
+  validatePercentageParam,
   evaluateNexPointQuota,
   sanitizeSensitiveFreightData,
   sanitizeChatMessageText,
@@ -40,6 +42,7 @@ export interface PlatformSettings {
   trialDays: number;
   contractMaintenanceFeePercent: number;
   affiliateFirstSubscriptionCommissionPercent: number;
+  affiliateNexIASubscriptionCommissionPercent: number;
   affiliateContractFeeCommissionPercent: number;
   affiliateAttributionWindowDays: number;
   minWithdrawalAmountBrl: number;
@@ -58,9 +61,10 @@ export interface PlatformSettings {
 const platformSettings: PlatformSettings = {
   dailyFreeNexPointLimit: 3,
   trialDays: 15,
-  contractMaintenanceFeePercent: 6.5,
-  affiliateFirstSubscriptionCommissionPercent: 25,
-  affiliateContractFeeCommissionPercent: 10,
+  contractMaintenanceFeePercent: DEFAULT_COMMERCIAL_RATES.contractMaintenanceFeePercent,
+  affiliateFirstSubscriptionCommissionPercent: DEFAULT_COMMERCIAL_RATES.affiliateFirstSubscriptionCommissionPercent,
+  affiliateNexIASubscriptionCommissionPercent: DEFAULT_COMMERCIAL_RATES.affiliateNexIASubscriptionCommissionPercent,
+  affiliateContractFeeCommissionPercent: DEFAULT_COMMERCIAL_RATES.affiliateContractFeeCommissionPercent,
   affiliateAttributionWindowDays: 30,
   minWithdrawalAmountBrl: 150,
   plans: [
@@ -992,8 +996,10 @@ app.post('/api/affiliates/evaluate-commission', (req, res) => {
     eventTimestampMs: Date.now(),
     attributionWindowDays: platformSettings.affiliateAttributionWindowDays,
     eventType: req.body.eventType || 'FIRST_PAID_SUBSCRIPTION',
+    subscriptionPlanType: req.body.subscriptionPlanType || 'STANDARD',
     baseAmountBrl: Number(req.body.baseAmountBrl) || 164.7,
     firstSubscriptionCommissionRatePercent: platformSettings.affiliateFirstSubscriptionCommissionPercent,
+    nexiaSubscriptionCommissionRatePercent: platformSettings.affiliateNexIASubscriptionCommissionPercent,
     contractFeeCommissionRatePercent: platformSettings.affiliateContractFeeCommissionPercent,
   });
   res.json(result);
@@ -1058,20 +1064,49 @@ app.put('/api/admin/settings', (req, res) => {
     dailyFreeNexPointLimit,
     contractMaintenanceFeePercent,
     affiliateFirstSubscriptionCommissionPercent,
+    affiliateNexIASubscriptionCommissionPercent,
     affiliateContractFeeCommissionPercent,
   } = req.body;
 
+  const parseFiniteNumber = (raw: unknown): number => {
+    if (typeof raw === 'number') return raw;
+    if (typeof raw === 'string' && raw.trim() !== '') return Number(raw);
+    return Number.NaN;
+  };
+
   if (dailyFreeNexPointLimit !== undefined) {
-    platformSettings.dailyFreeNexPointLimit = Math.max(1, Number(dailyFreeNexPointLimit));
+    const parsedLimit = parseFiniteNumber(dailyFreeNexPointLimit);
+    if (!Number.isFinite(parsedLimit) || parsedLimit < 1) {
+      return res.status(400).json({
+        error: 'Parâmetro "dailyFreeNexPointLimit" inválido: informe um número finito maior ou igual a 1.',
+      });
+    }
+    platformSettings.dailyFreeNexPointLimit = Math.floor(parsedLimit);
   }
-  if (contractMaintenanceFeePercent !== undefined) {
-    platformSettings.contractMaintenanceFeePercent = Math.max(0, Number(contractMaintenanceFeePercent));
-  }
-  if (affiliateFirstSubscriptionCommissionPercent !== undefined) {
-    platformSettings.affiliateFirstSubscriptionCommissionPercent = Math.max(0, Number(affiliateFirstSubscriptionCommissionPercent));
-  }
-  if (affiliateContractFeeCommissionPercent !== undefined) {
-    platformSettings.affiliateContractFeeCommissionPercent = Math.max(0, Number(affiliateContractFeeCommissionPercent));
+
+  const percentageUpdates: {
+    key:
+      | 'contractMaintenanceFeePercent'
+      | 'affiliateFirstSubscriptionCommissionPercent'
+      | 'affiliateNexIASubscriptionCommissionPercent'
+      | 'affiliateContractFeeCommissionPercent';
+    raw: unknown;
+  }[] = [
+    { key: 'contractMaintenanceFeePercent', raw: contractMaintenanceFeePercent },
+    { key: 'affiliateFirstSubscriptionCommissionPercent', raw: affiliateFirstSubscriptionCommissionPercent },
+    { key: 'affiliateNexIASubscriptionCommissionPercent', raw: affiliateNexIASubscriptionCommissionPercent },
+    { key: 'affiliateContractFeeCommissionPercent', raw: affiliateContractFeeCommissionPercent },
+  ];
+
+  for (const item of percentageUpdates) {
+    if (item.raw !== undefined) {
+      const parsed = parseFiniteNumber(item.raw);
+      const check = validatePercentageParam(parsed, item.key);
+      if (!check.valid) {
+        return res.status(400).json({ error: check.error });
+      }
+      platformSettings[item.key] = check.value;
+    }
   }
 
   serverAuditLogs.unshift({
@@ -1080,7 +1115,7 @@ app.put('/api/admin/settings', (req, res) => {
     actor: 'Administrador NexCarga Control',
     action: 'ATUALIZACAO_PARAMETROS_COMERCIAIS',
     target: 'Configurações Globais',
-    details: `NexPoint=${platformSettings.dailyFreeNexPointLimit}/24h | Taxa Contrato=${platformSettings.contractMaintenanceFeePercent}% | Afiliado 1ª Assinatura=${platformSettings.affiliateFirstSubscriptionCommissionPercent}%`,
+    details: `NexPoint=${platformSettings.dailyFreeNexPointLimit}/24h | Taxa Contrato=${platformSettings.contractMaintenanceFeePercent}% | Afiliado 1ª Assinatura=${platformSettings.affiliateFirstSubscriptionCommissionPercent}% | Afiliado Assinatura NexIA=${platformSettings.affiliateNexIASubscriptionCommissionPercent}% | Afiliado Taxa Contrato=${platformSettings.affiliateContractFeeCommissionPercent}%`,
   });
 
   res.json({ success: true, settings: platformSettings });
