@@ -392,16 +392,52 @@ export const DEFAULT_COMMERCIAL_RATES: CommercialRatesConfig = {
 };
 
 /**
- * Arredondamento monetário consistente (half-up comercial para 2 casas decimais)
- * eliminando imprecisões de representação binária IEEE-754 (ex.: 79.90 * 25% = 19.975 -> 19.98; 350 * 1.75% = 6.125 -> 6.13).
+ * Limite máximo seguro para operações monetárias em centavos inteiros:
+ * R$ 9.000.000.000.000,00 (9 trilhões de reais = 900.000.000.000.000 centavos < Number.MAX_SAFE_INTEGER).
+ * Limite mínimo diferente de zero após arredondamento: R$ 0,01 (1 centavo).
+ */
+export const MAX_SAFE_CURRENCY_BRL = 9_000_000_000_000;
+
+/**
+ * Arredondamento monetário consistente baseado em centavos inteiros (half-up comercial para 2 casas decimais):
+ * - Rejeita NaN, ±Infinity, tipos não numéricos e valores cujo módulo exceda MAX_SAFE_CURRENCY_BRL.
+ * - Trata valores positivos e negativos de forma simétrica (ex.: 0,005 -> 0,01 e -0,005 -> -0,01; 6,125 -> 6,13 e -6,125 -> -6,13).
+ * - Decompõe a parte inteira em centavos inteiros exatos e converte a fração de real em micro-centavos inteiros (10^-6 centavo)
+ *   antes de aplicar a divisão inteira half-up ((microCents + 500_000) / 1_000_000), eliminando erros de representação IEEE-754
+ *   (ex.: 79,90 * 25% = 19,975 -> 1998 centavos -> R$ 19,98) sem usar Number.EPSILON arbitrário nem corromper casos de fronteira (ex.: 19,974999 -> R$ 19,97).
  */
 export function roundCurrencyBrl(value: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new Error('Valor monetário inválido: informe um número finito.');
   }
+
+  const absVal = Math.abs(value);
+  if (absVal > MAX_SAFE_CURRENCY_BRL) {
+    throw new Error(
+      `Valor monetário fora do limite seguro suportado (máx. R$ ${MAX_SAFE_CURRENCY_BRL.toLocaleString('pt-BR')}).`
+    );
+  }
+
+  if (absVal === 0) {
+    return 0;
+  }
+
   const sign = value < 0 ? -1 : 1;
-  const absNormalized = Number(Math.abs(value).toPrecision(12));
-  return (sign * Math.round(absNormalized * 100)) / 100;
+  const wholeReais = Math.trunc(absVal);
+  const wholeCents = wholeReais * 100;
+  const fractionalReais = absVal - wholeReais;
+
+  // Converte a fração [0, 1) para micro-centavos inteiros (1 centavo = 1.000.000 micro-centavos)
+  const microCents = Math.round(fractionalReais * 100_000_000);
+  // Divisão inteira com arredondamento comercial half-up (+500.000 micro-centavos = +0,5 centavo)
+  const fractionalCents = Math.floor((microCents + 500_000) / 1_000_000);
+  const totalIntegerCents = wholeCents + fractionalCents;
+
+  if (totalIntegerCents === 0) {
+    return 0;
+  }
+
+  return (sign * totalIntegerCents) / 100;
 }
 
 export function isValidPercentage(value: unknown): value is number {
@@ -459,6 +495,10 @@ export function calculateContractMaintenanceFee(
   };
 }
 
+export interface AdminSettingsConfig extends CommercialRatesConfig {
+  dailyFreeNexPointLimit: number;
+}
+
 /**
  * Atualiza parâmetros comerciais de forma isolada e segura,
  * garantindo que números não finitos ou fora de [0, 100] sejam rejeitados
@@ -488,6 +528,55 @@ export function updateCommercialRatesConfig(
   }
 
   return next;
+}
+
+/**
+ * Valida integralmente todos os parâmetros recebidos para PUT /api/admin/settings
+ * montando um objeto temporário antes de qualquer mutação.
+ * Se qualquer campo for inválido, retorna { valid: false, error } sem modificar o objeto original.
+ */
+export function validateAndBuildAdminSettingsUpdate<T extends AdminSettingsConfig>(
+  currentSettings: T,
+  payload: Record<string, unknown>
+): { valid: true; nextSettings: T } | { valid: false; error: string } {
+  const parseStrictNumeric = (raw: unknown): number => {
+    if (typeof raw === 'number') return raw;
+    if (typeof raw === 'string' && raw.trim() !== '') return Number(raw);
+    return Number.NaN;
+  };
+
+  const nextSettings: T = { ...currentSettings };
+
+  if (payload.dailyFreeNexPointLimit !== undefined) {
+    const parsedLimit = parseStrictNumeric(payload.dailyFreeNexPointLimit);
+    if (!Number.isFinite(parsedLimit) || !Number.isInteger(parsedLimit) || parsedLimit < 1) {
+      return {
+        valid: false,
+        error: 'Parâmetro "dailyFreeNexPointLimit" inválido: informe um número inteiro maior ou igual a 1.',
+      };
+    }
+    nextSettings.dailyFreeNexPointLimit = parsedLimit;
+  }
+
+  const percentageKeys: (keyof CommercialRatesConfig)[] = [
+    'contractMaintenanceFeePercent',
+    'affiliateFirstSubscriptionCommissionPercent',
+    'affiliateNexIASubscriptionCommissionPercent',
+    'affiliateContractFeeCommissionPercent',
+  ];
+
+  for (const key of percentageKeys) {
+    if (payload[key] !== undefined) {
+      const parsed = parseStrictNumeric(payload[key]);
+      const check = validatePercentageParam(parsed, key);
+      if (!check.valid) {
+        return { valid: false, error: check.error! };
+      }
+      nextSettings[key] = check.value;
+    }
+  }
+
+  return { valid: true, nextSettings };
 }
 
 export interface AffiliateCommissionEvaluationInput {

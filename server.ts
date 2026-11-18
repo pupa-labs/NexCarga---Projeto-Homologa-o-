@@ -10,7 +10,7 @@ import {
 } from './src/domain/catalog.ts';
 import {
   DEFAULT_COMMERCIAL_RATES,
-  validatePercentageParam,
+  validateAndBuildAdminSettingsUpdate,
   evaluateNexPointQuota,
   sanitizeSensitiveFreightData,
   sanitizeChatMessageText,
@@ -309,14 +309,14 @@ const serverContracts: {
     companyName: 'Café Real Exportadora S.A.',
     driverName: 'Carlos Eduardo Silva',
     valueBrl: 2850.0,
-    maintenanceFeeBrl: 185.25,
+    maintenanceFeeBrl: 99.75,
     feePaymentConfirmed: true,
     currentStage: '11_EM_TRANSPORTE',
     statusCategory: 'ATIVO',
     statusBadgeLabel: 'Em andamento',
     events: [
       { stage: '6_CONTRATO_FORMALIZADO', label: '06. Contrato Formalizado', timestampIso: '2026-11-11T08:30:00-03:00', actor: 'Sistema NexCarga' },
-      { stage: '7_TAXA_COBRADA', label: '07. Taxa de Serviço Emitida (R$ 185,25)', timestampIso: '2026-11-11T08:31:00-03:00', actor: 'NexFinance' },
+      { stage: '7_TAXA_COBRADA', label: '07. Taxa de Serviço Emitida (R$ 99,75)', timestampIso: '2026-11-11T08:31:00-03:00', actor: 'NexFinance' },
       { stage: '8_PAGAMENTO_CONFIRMADO', label: '08. Pagamento Confirmado no Servidor', timestampIso: '2026-11-11T08:35:00-03:00', actor: 'Webhook Idempotente' },
       { stage: '9_DADOS_LIBERADOS', label: '09. Endereço Exato e Contato Liberados', timestampIso: '2026-11-11T08:35:05-03:00', actor: 'Guard de Privacidade' },
       { stage: '10_EM_COLETA', label: '10. Coleta Iniciada em Manhuaçu - MG', timestampIso: '2026-11-11T09:10:00-03:00', actor: 'Carlos Eduardo Silva (Motorista)' },
@@ -331,14 +331,14 @@ const serverContracts: {
     companyName: 'Transporte XYZ & Logística',
     driverName: 'Carlos Eduardo Silva',
     valueBrl: 3250.0,
-    maintenanceFeeBrl: 211.25,
+    maintenanceFeeBrl: 113.75,
     feePaymentConfirmed: false,
     currentStage: '7_TAXA_COBRADA',
     statusCategory: 'ATIVO',
     statusBadgeLabel: 'Aguardando coleta',
     events: [
       { stage: '6_CONTRATO_FORMALIZADO', label: '06. Contrato Formalizado', timestampIso: '2026-11-11T09:15:00-03:00', actor: 'Sistema NexCarga' },
-      { stage: '7_TAXA_COBRADA', label: '07. Taxa de Serviço Emitida (R$ 211,25) — Aguardando Confirmação', timestampIso: '2026-11-11T09:16:00-03:00', actor: 'NexFinance' },
+      { stage: '7_TAXA_COBRADA', label: '07. Taxa de Serviço Emitida (R$ 113,75) — Aguardando Confirmação', timestampIso: '2026-11-11T09:16:00-03:00', actor: 'NexFinance' },
     ],
   },
   {
@@ -349,7 +349,7 @@ const serverContracts: {
     companyName: 'Distribuidora Zona da Mata Ltda',
     driverName: 'Carlos Eduardo Silva',
     valueBrl: 1480.0,
-    maintenanceFeeBrl: 96.2,
+    maintenanceFeeBrl: 51.8,
     feePaymentConfirmed: true,
     currentStage: '14_CONCLUIDO',
     statusCategory: 'CONCLUIDO',
@@ -501,7 +501,7 @@ const serverFinancialLedger: LedgerEntry[] = [
     idempotencyKey: 'fee:NC-04581',
     type: 'TAXA_CONTRATO',
     direction: 'CREDIT',
-    amountBrl: 185.25,
+    amountBrl: 99.75,
     referenceId: '#NC-04581',
     description: 'Taxa de manutenção recebida — Contrato #NC-04581 (Manhuaçu → BH)',
     createdAtIso: '2026-11-11T08:35:00-03:00',
@@ -511,7 +511,7 @@ const serverFinancialLedger: LedgerEntry[] = [
     idempotencyKey: 'fee:NC-04521',
     type: 'TAXA_CONTRATO',
     direction: 'CREDIT',
-    amountBrl: 96.2,
+    amountBrl: 51.8,
     referenceId: '#NC-04521',
     description: 'Taxa de manutenção recebida — Contrato #NC-04521 (Reduto → Ipatinga)',
     createdAtIso: '2026-11-10T10:00:00-03:00',
@@ -558,7 +558,7 @@ const serverAuditLogs: {
     actor: 'Sistema NexFinance',
     action: 'CONFIRMACAO_TAXA_SERVICO',
     target: 'Contrato #NC-04581',
-    details: 'Pagamento confirmado via webhook idempotente (R$ 185,25). Dados sensíveis liberados para as partes.',
+    details: 'Pagamento confirmado via webhook idempotente (R$ 99,75). Dados sensíveis liberados para as partes.',
   },
   {
     id: 'aud-02',
@@ -1058,57 +1058,20 @@ app.post('/api/admin/assisted-session/end', (_req, res) => {
   res.json({ success: true });
 });
 
-// Atualizar Parâmetros Comerciais Centralizados (NexCarga Control)
+// Atualizar Parâmetros Comerciais Centralizados (NexCarga Control) — Atualização Estritamente Atômica
 app.put('/api/admin/settings', (req, res) => {
-  const {
-    dailyFreeNexPointLimit,
-    contractMaintenanceFeePercent,
-    affiliateFirstSubscriptionCommissionPercent,
-    affiliateNexIASubscriptionCommissionPercent,
-    affiliateContractFeeCommissionPercent,
-  } = req.body;
+  const payload = req.body && typeof req.body === 'object' ? req.body : {};
 
-  const parseFiniteNumber = (raw: unknown): number => {
-    if (typeof raw === 'number') return raw;
-    if (typeof raw === 'string' && raw.trim() !== '') return Number(raw);
-    return Number.NaN;
-  };
-
-  if (dailyFreeNexPointLimit !== undefined) {
-    const parsedLimit = parseFiniteNumber(dailyFreeNexPointLimit);
-    if (!Number.isFinite(parsedLimit) || parsedLimit < 1) {
-      return res.status(400).json({
-        error: 'Parâmetro "dailyFreeNexPointLimit" inválido: informe um número finito maior ou igual a 1.',
-      });
-    }
-    platformSettings.dailyFreeNexPointLimit = Math.floor(parsedLimit);
+  // 1. Valida todos os campos recebidos e monta um objeto temporário sem alterar platformSettings
+  const validation = validateAndBuildAdminSettingsUpdate(platformSettings, payload);
+  if (!validation.valid) {
+    return res.status(400).json({ error: validation.error });
   }
 
-  const percentageUpdates: {
-    key:
-      | 'contractMaintenanceFeePercent'
-      | 'affiliateFirstSubscriptionCommissionPercent'
-      | 'affiliateNexIASubscriptionCommissionPercent'
-      | 'affiliateContractFeeCommissionPercent';
-    raw: unknown;
-  }[] = [
-    { key: 'contractMaintenanceFeePercent', raw: contractMaintenanceFeePercent },
-    { key: 'affiliateFirstSubscriptionCommissionPercent', raw: affiliateFirstSubscriptionCommissionPercent },
-    { key: 'affiliateNexIASubscriptionCommissionPercent', raw: affiliateNexIASubscriptionCommissionPercent },
-    { key: 'affiliateContractFeeCommissionPercent', raw: affiliateContractFeeCommissionPercent },
-  ];
+  // 2. Somente após todas as validações aprovadas, aplica as alterações de uma única vez
+  Object.assign(platformSettings, validation.nextSettings);
 
-  for (const item of percentageUpdates) {
-    if (item.raw !== undefined) {
-      const parsed = parseFiniteNumber(item.raw);
-      const check = validatePercentageParam(parsed, item.key);
-      if (!check.valid) {
-        return res.status(400).json({ error: check.error });
-      }
-      platformSettings[item.key] = check.value;
-    }
-  }
-
+  // 3. Gera o log de auditoria somente após a atualização bem-sucedida
   serverAuditLogs.unshift({
     id: `aud-${Date.now()}`,
     timestampIso: new Date().toISOString(),

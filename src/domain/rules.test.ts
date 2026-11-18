@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_COMMERCIAL_RATES,
+  MAX_SAFE_CURRENCY_BRL,
   roundCurrencyBrl,
   validatePercentageParam,
   calculateContractMaintenanceFee,
   updateCommercialRatesConfig,
+  validateAndBuildAdminSettingsUpdate,
   evaluateNexPointQuota,
   sanitizeSensitiveFreightData,
   sanitizeChatMessageText,
@@ -231,7 +233,69 @@ test('Regras comerciais oficiais: assinatura de R$ 79,90 com comissão de 25% re
   assert.equal(subCommission.commissionAmountBrl, 19.98);
 });
 
-test('Validação e isolamento de parâmetros comerciais: rejeita percentuais inválidos e preserva independência entre taxas e valor do frete', () => {
+test('Independência entre comissões Standard e NexIA: seleciona a taxa correta por tipo de assinatura e preserva isolamento nas alterações', () => {
+  // 1. Standard com comissão de 25% utiliza 25% mesmo quando NexIA está configurada em 30%
+  const standardEval = evaluateAffiliateCommission({
+    affiliateUserId: 'usr-1',
+    affiliateDocumentCpfCnpj: '111.222.333-44',
+    affiliateEmail: 'joao@afiliado.com.br',
+    referredUserId: 'usr-9',
+    referredDocumentCpfCnpj: '99.888.777/0001-66',
+    referredEmail: 'contato@transportexyz.com.br',
+    referralCreatedAtMs: 1000,
+    eventTimestampMs: 2000,
+    attributionWindowDays: 30,
+    eventType: 'FIRST_PAID_SUBSCRIPTION',
+    subscriptionPlanType: 'STANDARD',
+    baseAmountBrl: 200.0,
+    firstSubscriptionCommissionRatePercent: 25,
+    nexiaSubscriptionCommissionRatePercent: 30,
+    contractFeeCommissionRatePercent: 1.75,
+  });
+  assert.equal(standardEval.eligible, true);
+  assert.equal(standardEval.appliedRatePercent, 25);
+  assert.equal(standardEval.commissionAmountBrl, 50.0);
+
+  // 2. NexIA com comissão de 30% utiliza 30% mesmo quando Standard está configurada em 25%
+  const nexiaEval = evaluateAffiliateCommission({
+    affiliateUserId: 'usr-1',
+    affiliateDocumentCpfCnpj: '111.222.333-44',
+    affiliateEmail: 'joao@afiliado.com.br',
+    referredUserId: 'usr-9',
+    referredDocumentCpfCnpj: '99.888.777/0001-66',
+    referredEmail: 'contato@transportexyz.com.br',
+    referralCreatedAtMs: 1000,
+    eventTimestampMs: 2000,
+    attributionWindowDays: 30,
+    eventType: 'FIRST_PAID_SUBSCRIPTION',
+    subscriptionPlanType: 'NEXIA',
+    baseAmountBrl: 200.0,
+    firstSubscriptionCommissionRatePercent: 25,
+    nexiaSubscriptionCommissionRatePercent: 30,
+    contractFeeCommissionRatePercent: 1.75,
+  });
+  assert.equal(nexiaEval.eligible, true);
+  assert.equal(nexiaEval.appliedRatePercent, 30);
+  assert.equal(nexiaEval.commissionAmountBrl, 60.0);
+
+  // 3. Alterar a comissão NexIA NÃO altera a comissão Standard
+  const afterNexIAChange = updateCommercialRatesConfig(DEFAULT_COMMERCIAL_RATES, {
+    affiliateNexIASubscriptionCommissionPercent: 30,
+  });
+  assert.equal(afterNexIAChange.affiliateNexIASubscriptionCommissionPercent, 30);
+  assert.equal(afterNexIAChange.affiliateFirstSubscriptionCommissionPercent, 25);
+  assert.equal(afterNexIAChange.affiliateContractFeeCommissionPercent, 1.75);
+
+  // 4. Alterar a comissão Standard NÃO altera a comissão NexIA
+  const afterStandardChange = updateCommercialRatesConfig(afterNexIAChange, {
+    affiliateFirstSubscriptionCommissionPercent: 18,
+  });
+  assert.equal(afterStandardChange.affiliateFirstSubscriptionCommissionPercent, 18);
+  assert.equal(afterStandardChange.affiliateNexIASubscriptionCommissionPercent, 30);
+  assert.equal(afterStandardChange.affiliateContractFeeCommissionPercent, 1.75);
+});
+
+test('Validação, atomicidade e isolamento de parâmetros comerciais: rejeita percentuais inválidos sem mutação parcial', () => {
   // 1. Valores percentuais inválidos são rejeitados (< 0, > 100, NaN, Infinity, tipos inválidos)
   for (const invalidVal of [-0.01, -10, 100.01, 250, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '3.5' as any, null as any]) {
     const check = validatePercentageParam(invalidVal, 'taxaTeste');
@@ -266,7 +330,41 @@ test('Validação e isolamento de parâmetros comerciais: rejeita percentuais in
     assert.equal(invalidCommissionEval.commissionAmountBrl, 0);
   }
 
-  // 2. Alterar a comissão sobre a taxa de frete NÃO altera a comissão de assinatura (Standard ou NexIA)
+  // 2. Atomicidade de validateAndBuildAdminSettingsUpdate: falha em qualquer campo preserva 100% do estado original
+  const initialAdminSettings = {
+    dailyFreeNexPointLimit: 3,
+    ...DEFAULT_COMMERCIAL_RATES,
+  };
+  const snapshotBefore = { ...initialAdminSettings };
+
+  const failedMixedUpdate = validateAndBuildAdminSettingsUpdate(initialAdminSettings, {
+    dailyFreeNexPointLimit: 9, // válido isoladamente
+    contractMaintenanceFeePercent: 150, // inválido (> 100)
+  });
+  assert.equal(failedMixedUpdate.valid, false);
+  assert.deepEqual(initialAdminSettings, snapshotBefore);
+
+  const failedFractionalNexPoint = validateAndBuildAdminSettingsUpdate(initialAdminSettings, {
+    dailyFreeNexPointLimit: 2.5, // inválido (não inteiro)
+    contractMaintenanceFeePercent: 4.0,
+  });
+  assert.equal(failedFractionalNexPoint.valid, false);
+  assert.deepEqual(initialAdminSettings, snapshotBefore);
+
+  const validAtomicUpdate = validateAndBuildAdminSettingsUpdate(initialAdminSettings, {
+    dailyFreeNexPointLimit: 5,
+    affiliateNexIASubscriptionCommissionPercent: 30,
+  });
+  assert.equal(validAtomicUpdate.valid, true);
+  if (validAtomicUpdate.valid) {
+    assert.equal(validAtomicUpdate.nextSettings.dailyFreeNexPointLimit, 5);
+    assert.equal(validAtomicUpdate.nextSettings.affiliateNexIASubscriptionCommissionPercent, 30);
+    assert.equal(validAtomicUpdate.nextSettings.affiliateFirstSubscriptionCommissionPercent, 25);
+    assert.equal(validAtomicUpdate.nextSettings.contractMaintenanceFeePercent, 3.5);
+    assert.equal(validAtomicUpdate.nextSettings.affiliateContractFeeCommissionPercent, 1.75);
+  }
+
+  // 3. Alterar a comissão sobre a taxa de frete NÃO altera a comissão de assinatura (Standard ou NexIA)
   const updatedAfterContractCommChange = updateCommercialRatesConfig(DEFAULT_COMMERCIAL_RATES, {
     affiliateContractFeeCommissionPercent: 2.5,
   });
@@ -284,7 +382,7 @@ test('Validação e isolamento de parâmetros comerciais: rejeita percentuais in
     DEFAULT_COMMERCIAL_RATES.contractMaintenanceFeePercent
   );
 
-  // 3. Alterar a taxa de contrato NÃO altera o valor principal do frete
+  // 4. Alterar a taxa de contrato NÃO altera o valor principal do frete
   const originalFreightPrincipal = 10000.0;
   const calcAt35 = calculateContractMaintenanceFee(originalFreightPrincipal, 3.5);
   const calcAt50 = calculateContractMaintenanceFee(originalFreightPrincipal, 5.0);
@@ -292,6 +390,35 @@ test('Validação e isolamento de parâmetros comerciais: rejeita percentuais in
   assert.equal(calcAt50.freightPrincipalValueBrl, originalFreightPrincipal);
   assert.equal(calcAt35.maintenanceFeeBrl, 350.0);
   assert.equal(calcAt50.maintenanceFeeBrl, 500.0);
+});
+
+test('Precisão monetária em centavos inteiros (roundCurrencyBrl): valores pequenos, elevados, limites half-up e overflow', () => {
+  // Valores pequenos e fronteiras de meio centavo (positivos e negativos)
+  assert.equal(roundCurrencyBrl(0), 0);
+  assert.equal(roundCurrencyBrl(0.004), 0);
+  assert.equal(roundCurrencyBrl(0.004999), 0);
+  assert.equal(roundCurrencyBrl(0.005), 0.01);
+  assert.equal(roundCurrencyBrl(-0.004999), 0);
+  assert.equal(roundCurrencyBrl(-0.005), -0.01);
+
+  // Casos de meio centavo exato e fronteira inferior imediata
+  assert.equal(roundCurrencyBrl(6.125), 6.13);
+  assert.equal(roundCurrencyBrl(-6.125), -6.13);
+  assert.equal(roundCurrencyBrl(6.124999), 6.12);
+  assert.equal(roundCurrencyBrl((79.9 * 25) / 100), 19.98);
+  assert.equal(roundCurrencyBrl(-(79.9 * 25) / 100), -19.98);
+  assert.equal(roundCurrencyBrl(19.974999), 19.97);
+
+  // Valores elevados dentro do limite seguro suportado
+  assert.equal(roundCurrencyBrl(12_345_678_901.235), 12_345_678_901.24);
+  assert.equal(roundCurrencyBrl(MAX_SAFE_CURRENCY_BRL), MAX_SAFE_CURRENCY_BRL);
+
+  // Rejeição de NaN, ±Infinity e overflow acima de MAX_SAFE_CURRENCY_BRL
+  assert.throws(() => roundCurrencyBrl(Number.NaN));
+  assert.throws(() => roundCurrencyBrl(Number.POSITIVE_INFINITY));
+  assert.throws(() => roundCurrencyBrl(Number.NEGATIVE_INFINITY));
+  assert.throws(() => roundCurrencyBrl(MAX_SAFE_CURRENCY_BRL + 1));
+  assert.throws(() => roundCurrencyBrl(-(MAX_SAFE_CURRENCY_BRL + 1)));
 });
 
 test('Afiliados e NexFinance: bloqueia autoindicação, não paga por cadastro simples e gera estorno compensatório', () => {
@@ -337,7 +464,7 @@ test('Afiliados e NexFinance: bloqueia autoindicação, não paga por cadastro s
       idempotencyKey: 'pay:101',
       type: 'TAXA_CONTRATO',
       direction: 'CREDIT',
-      amountBrl: 185,
+      amountBrl: 99.75,
       referenceId: 'NC-04581',
       description: 'Taxa de serviço contrato #NC-04581',
       createdAtIso: '2026-11-11T10:00:00Z',
@@ -349,4 +476,5 @@ test('Afiliados e NexFinance: bloqueia autoindicação, não paga por cadastro s
   assert.equal(compEntry.direction, 'DEBIT');
   assert.equal(compEntry.compensatesEntryId, 'led-101');
 });
+
 

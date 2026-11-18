@@ -174,6 +174,7 @@ export const DashboardsViews: React.FC<DashboardsViewsProps> = ({
   const [showQrModal, setShowQrModal] = useState(false);
   const [simDoc, setSimDoc] = useState('24.890.512/0001-19');
   const [simType, setSimType] = useState<'FIRST_PAID_SUBSCRIPTION' | 'COMPLETED_PAID_CONTRACT_FEE' | 'SIGNUP_ONLY'>('FIRST_PAID_SUBSCRIPTION');
+  const [simPlanType, setSimPlanType] = useState<'STANDARD' | 'NEXIA'>('STANDARD');
   const [simAmount, setSimAmount] = useState('164.70');
   const [simResult, setSimResult] = useState<any | null>(null);
 
@@ -1275,11 +1276,16 @@ export const DashboardsViews: React.FC<DashboardsViewsProps> = ({
         referredDocument: simDoc,
         referredEmail: simDoc === '111.222.333-44' ? 'joao@afiliado.com.br' : 'cliente@indicado.com.br',
         eventType: simType,
+        subscriptionPlanType: simPlanType,
         baseAmountBrl: Number(simAmount),
       }),
     });
     const data = await res.json();
-    setSimResult(data);
+    setSimResult({
+      ...data,
+      simulatedEventType: simType,
+      simulatedPlanType: simPlanType,
+    });
   };
 
   return (
@@ -1406,22 +1412,51 @@ export const DashboardsViews: React.FC<DashboardsViewsProps> = ({
             Regras oficiais: (1) Comissão sobre a 1ª assinatura paga de indicado; (2) Comissão sobre a taxa de manutenção efetivamente recebida em contratos concluídos e pagos. Cliques, cadastros sem pagamento ou autoindicações (mesmo CPF/CNPJ) são bloqueados no servidor.
           </p>
 
-          <form onSubmit={handleSimulateCommission} className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+          <form onSubmit={handleSimulateCommission} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
             <div>
-              <label className="block text-xs text-gray-300 mb-1">Evento do Indicado</label>
+              <label htmlFor="sim-event-type" className="block text-xs text-gray-300 mb-1">
+                Evento do Indicado
+              </label>
               <select
+                id="sim-event-type"
                 value={simType}
                 onChange={(e) => setSimType(e.target.value as any)}
                 className="w-full px-3 py-2.5 rounded-lg bg-[#111111] border border-white/10 text-xs text-white"
               >
-                <option value="FIRST_PAID_SUBSCRIPTION">1ª Assinatura Paga ({settings.affiliateFirstSubscriptionCommissionPercent}%)</option>
-                <option value="COMPLETED_PAID_CONTRACT_FEE">Taxa de Contrato Concluído e Pago ({settings.affiliateContractFeeCommissionPercent}%)</option>
+                <option value="FIRST_PAID_SUBSCRIPTION">
+                  1ª Assinatura Paga (Standard {settings.affiliateFirstSubscriptionCommissionPercent}% / NexIA {settings.affiliateNexIASubscriptionCommissionPercent ?? 25}%)
+                </option>
+                <option value="COMPLETED_PAID_CONTRACT_FEE">
+                  Taxa de Contrato Concluído e Pago ({settings.affiliateContractFeeCommissionPercent}%)
+                </option>
                 <option value="SIGNUP_ONLY">Apenas Cadastro / Clique (Sem pagamento)</option>
               </select>
             </div>
             <div>
-              <label className="block text-xs text-gray-300 mb-1">CPF/CNPJ do Indicado (Teste Antifraude)</label>
+              <label htmlFor="sim-plan-type" className="block text-xs text-gray-300 mb-1">
+                Modalidade de Assinatura
+              </label>
+              <select
+                id="sim-plan-type"
+                value={simPlanType}
+                onChange={(e) => setSimPlanType(e.target.value as 'STANDARD' | 'NEXIA')}
+                disabled={simType !== 'FIRST_PAID_SUBSCRIPTION'}
+                className="w-full px-3 py-2.5 rounded-lg bg-[#111111] border border-white/10 text-xs text-white disabled:opacity-50"
+              >
+                <option value="STANDARD">
+                  STANDARD ({settings.affiliateFirstSubscriptionCommissionPercent}%)
+                </option>
+                <option value="NEXIA">
+                  NEXIA ({settings.affiliateNexIASubscriptionCommissionPercent ?? 25}%)
+                </option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="sim-doc" className="block text-xs text-gray-300 mb-1">
+                CPF/CNPJ do Indicado (Teste Antifraude)
+              </label>
               <input
+                id="sim-doc"
                 type="text"
                 value={simDoc}
                 onChange={(e) => setSimDoc(e.target.value)}
@@ -1430,10 +1465,13 @@ export const DashboardsViews: React.FC<DashboardsViewsProps> = ({
               />
             </div>
             <div>
-              <label className="block text-xs text-gray-300 mb-1">Valor Base Recebido (R$)</label>
+              <label htmlFor="sim-amount" className="block text-xs text-gray-300 mb-1">
+                Valor Base Recebido (R$)
+              </label>
               <input
+                id="sim-amount"
                 type="number"
-                step="0.1"
+                step="0.01"
                 value={simAmount}
                 onChange={(e) => setSimAmount(e.target.value)}
                 className="w-full px-3 py-2.5 rounded-lg bg-[#111111] border border-white/10 text-xs text-white font-mono"
@@ -1457,8 +1495,12 @@ export const DashboardsViews: React.FC<DashboardsViewsProps> = ({
             >
               <div className="font-bold text-sm mb-1">
                 {simResult.eligible
-                  ? `Elegível! Comissão Calculada: R$ ${Number(simResult.commissionAmountBrl).toFixed(2)} (${simResult.appliedRatePercent}%)`
-                  : 'Comissão Não Liberada pelo Servidor'}
+                  ? `Elegível! Comissão Calculada: R$ ${Number(simResult.commissionAmountBrl).toFixed(2)} (Taxa aplicada: ${simResult.appliedRatePercent}%${
+                      simResult.simulatedEventType === 'FIRST_PAID_SUBSCRIPTION'
+                        ? ` · Assinatura ${simResult.simulatedPlanType || simPlanType}`
+                        : ' · Taxa de Serviço NexCarga'
+                    })`
+                  : `Comissão Não Liberada pelo Servidor (Taxa aplicada: ${simResult.appliedRatePercent}%)`}
               </div>
               <div>{simResult.reason}</div>
             </div>
